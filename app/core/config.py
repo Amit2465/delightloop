@@ -1,5 +1,6 @@
 import os
 
+import sendgrid
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,6 +15,8 @@ class Settings(BaseSettings):
     deepgram_url: str = Field(..., alias="DEEPGRAM_URL")
     deepgram_api_key: str = Field(..., alias="DEEPGRAM_API_KEY")
     redis_url: str = Field(..., alias="REDIS_URL")
+    sendgrid_api_key: str = Field(..., alias="SENDGRID_API_KEY")
+    email: str = Field(..., alias="EMAIL")
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(__file__), "../../.env"),
