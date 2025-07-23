@@ -25,7 +25,7 @@ async def websocket_client(websocket: WebSocket, session_id: str = Query(...)):
 
     try:
         async with connect(settings.deepgram_url, extra_headers=headers) as dg_ws:
-            logger.info("✅ Connected to Deepgram")
+            logger.info("Connected to Deepgram")
 
             async def send_to_deepgram():
                 try:
@@ -49,13 +49,15 @@ async def websocket_client(websocket: WebSocket, session_id: str = Query(...)):
 
                         try:
                             response_json = json.loads(response)
-                            logger.info(
-                                f"Parsed JSON: {json.dumps(response_json, indent=2)}"
-                            )
                         except Exception as e:
                             logger.warning(f"Invalid JSON from Deepgram: {e}")
+                            response_json = {"raw": response}
 
-                        await websocket.send_text(response)
+                        response_json["session_id"] = session_id
+                        logger.info(
+                            f"Sending with session_id: {json.dumps(response_json)}"
+                        )
+                        await websocket.send_text(json.dumps(response_json))
 
                 except asyncio.TimeoutError:
                     logger.warning("No Deepgram response within 10s")
