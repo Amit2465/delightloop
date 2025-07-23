@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.egg-info/
+.env
+.env.*
+*.sqlite3
+*.log
+*.venv
+
+# FastAPI / Uvicorn
+instance/
+*.db
+
+# MongoDB
+*.lock
+dump/
+*.bson
+*.json
+
+# Docker
+*.pid
+*.tar
+docker-compose.override.yml
+.docker/
+
+# VSCode / Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/

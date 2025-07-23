@@ -1,0 +1,53 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+*.whl
+*.tar.gz
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs and databases
+*.log
+*.db
+*.sqlite3
+*.bak
+
+# Coverage / testing
+coverage.*
+.coverage
+*.cover
+.pytest_cache/
+htmlcov/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDE/editor configs
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# Optional: remove if you want to exclude tests from build
+tests/
+
+# Note: .env is NOT ignored — it will be copied into the image
