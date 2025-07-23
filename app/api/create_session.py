@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter
 
 from app.schemas.session import SessionResponse
 
