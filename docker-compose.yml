@@ -11,20 +11,6 @@ services:
       timeout: 3s
       retries: 3
 
-  rabbitmq:
-    image: rabbitmq:3-management
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   chromadb:
     image: chromadb/chroma
     ports:
@@ -46,18 +32,6 @@ services:
       - "8080:8080"
     depends_on:
       - redis-server
-      - rabbitmq
-      - chromadb
-
-  celery-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: celery-worker
-    command: celery -A app.worker worker --loglevel=info
-    depends_on:
-      - redis-server
-      - rabbitmq
       - chromadb
 
 volumes:

@@ -1,7 +1,7 @@
 import json
 import logging
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import Optional
 
 from fastapi import HTTPException
 from langchain.output_parsers import OutputFixingParser
@@ -16,56 +16,13 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# === Scoring Result Schema ===
 
-# === Models ===
+class InterestScoreResult(BaseModel):
+    interest_score: float
+    reason: str
 
-
-class LeadTagResult(BaseModel):
-    tag: Literal["hot", "warm", "cold"]
-
-
-# === Prompt Builder ===
-
-
-def build_prompt_for_lead_tagging(
-    lead_data: dict, company_context: str, interactions: list[str], session_count: int
-) -> str:
-    return f"""
-You are an intelligent lead classification agent working for **{company_context}**.
-
-{company_context} is an AI-powered customer engagement platform that helps SaaS and product-led growth companies 
-increase user retention, product adoption, and reduce churn using behavior-based workflows, feedback campaigns, 
-and activation nudges.
-
-Your task is to analyze the lead's details and assign a tag:
-- "hot": strong interest match + prior activity
-- "warm": some relevance, limited prior signals
-- "cold": weak/no relevance
-
-Lead Details:
-- Name: {lead_data.get("full_name", "N/A")}
-- Email(s): {lead_data.get("emails", "N/A")}
-- Phone(s): {lead_data.get("phones", "N/A")}
-- Job title: {lead_data.get("title", "N/A")}
-- Company: {lead_data.get("company", "N/A")}
-- Website: {lead_data.get("website", "N/A")}
-
-Previous Interactions:
-{interactions if interactions else 'None found'}
-
-Session Activity Matches: {session_count}
-
-Return only a valid JSON object in this format:
-{{
-  "tag": "hot"
-}}
-
-Ensure the output is strictly valid JSON with no explanation or extra text.
-""".strip()
-
-
-# === Cached Factories ===
-
+# === LLM + Parser Factories ===
 
 @lru_cache()
 def get_llm() -> ChatGoogleGenerativeAI:
@@ -74,67 +31,57 @@ def get_llm() -> ChatGoogleGenerativeAI:
         google_api_key=settings.gemini_api_key,
     )
 
-
 @lru_cache()
-def get_output_parser() -> OutputFixingParser:
+def get_interest_score_output_parser() -> OutputFixingParser:
     llm = get_llm()
-    base_parser = PydanticOutputParser(pydantic_object=LeadTagResult)
+    base_parser = PydanticOutputParser(pydantic_object=InterestScoreResult)
     return OutputFixingParser.from_llm(parser=base_parser, llm=llm)
 
+# === Prompt ===
 
-# === Main Logic ===
+def build_prompt_for_interest_score(lead_data: dict) -> str:
+    return f"""
+You are an AI assistant for DelightLoop, a B2B growth-marketing company that blends AI automation with human curation to scale personalized physical gifting across the customer journey. DelightLoop's core product is an AI-powered gifting platform called 'Gifty' that analyzes CRM data, psychographic signals, and purchase intent to identify high-value prospects or at-risk customers. Gifty selects personalized gifts, orchestrates handwritten notes, handles procurement and international logistics from warehouses across Asia, the US, and Europe, and triggers follow-ups tied to buyer actions—all fully integrated into existing CRM and GTM tools. The goal is to amplify pipeline growth, accelerate deal closures, and reduce churn by turning gifting into a measurable, automated campaign rather than a one-off gesture.
 
+Here's the lead card information in JSON:
+{json.dumps(lead_data, ensure_ascii=False, indent=2)}
 
-async def classify_lead_with_ai(
+Using this data, return a JSON object with:
+- "interest_score": float from 0.0 (no fit) to 1.0 (perfect fit)
+- "reason": short, clear justification for the score (1-2 sentences max)
+
+Respond with only JSON in this format:
+{{
+  "interest_score": 0.85,
+  "reason": "CTO at a SaaS company – strong fit for AI-powered gifting platform."
+}}
+
+Do not add explanations or extra output.
+"""
+
+# === Main Agent Function ===
+
+async def score_lead_interest_with_ai(
     lead_data: dict,
-    interactions: list[str],
-    session_count: int,
     llm: Optional[BaseChatModel] = None,
     parser: Optional[BaseOutputParser] = None,
 ) -> dict:
-    prompt = build_prompt_for_lead_tagging(
-        lead_data=lead_data,
-        company_context="Delightloop",
-        interactions=interactions,
-        session_count=session_count,
-    )
-
-    logger.info("Prompt sent to LLM:\n%s", prompt)
-    print("\n===== Prompt Sent to LLM =====\n")
-    print(prompt)
-    print("\n==============================\n")
+    prompt = build_prompt_for_interest_score(lead_data)
 
     llm = llm or get_llm()
-    parser = parser or get_output_parser()
+    parser = parser or get_interest_score_output_parser()
 
     try:
         result = await llm.ainvoke([HumanMessage(content=prompt)])
-
-        logger.info("Raw LLM Output:\n%s", result.content)
-        print("\n===== Raw LLM Output =====\n")
-        print(result.content)
-        print("\n==========================\n")
-
         structured_output = await parser.ainvoke(result.content)
-
         return structured_output.dict()
-
     except Exception as e:
-        logger.error("Error parsing LLM output: %s", str(e))
-        logger.error(
-            "LLM Output that caused error:\n%s",
-            result.content if result else "No result",
-        )
-        print(f"Error parsing output: {e}")
-        print(
-            f"LLM Output that caused error:\n{result.content if result else 'No result'}"
-        )
-
+        logger.exception("Error scoring lead interest")
         raise HTTPException(
             status_code=500,
             detail={
-                "message": "Lead classification failed",
+                "message": "Lead interest scoring failed",
                 "error": str(e),
-                "raw_output": result.content if result else None,
+                "raw_output": getattr(result, "content", None),
             },
         )

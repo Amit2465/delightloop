@@ -19,4 +19,5 @@ class OcrResult(BaseModel):
     emails: List[EmailStr]
     phones: List[str]
     parsed_fields: ParsedFields
-    tag: str
+    interest_score: float
+    existing_customer: bool

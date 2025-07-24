@@ -1,202 +1,164 @@
-import logging
-from datetime import datetime, timezone
-from typing import List
-
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import ValidationError
-
+from datetime import datetime, timezone
 from app.agent.gemini_ocr import extract_card_data
-from app.agent.tagging_agent import classify_lead_with_ai
-from app.db.models.lead import Lead
-from app.db.models.session import Session
-from app.schemas.ocr import OcrResult, ParsedFields
-from app.services.match_data import find_mock_interactions
+from app.agent.tagging_agent import score_lead_interest_with_ai
+from app.db.models.lead import Lead, ParsedFields as LeadParsedFields
+import logging
+import aiobotocore.session
+from app.core.config import settings
+from uuid import UUID
 
 router = APIRouter(tags=["Card OCR"], prefix="/v1/card")
 logger = logging.getLogger("ocr_logger")
 
+FIELD_ALIASES = {
+    "full_name": "name",
+    "name": "name",
+    "emails": "email",
+    "email address": "email",
+    "mob": "phone",
+    "mobile": "phone",
+    "designation": "job_title",
+    "org": "company",
+    "organization": "company",
+    "site": "website",
+    "location": "address",
+}
 
-def flatten_field(value):
-    """
-    Normalize OCR output field into a flat list of strings.
+KNOWN_LEAD_FIELDS = {"emails", "phones", "name", "image_url", "interest_score", "existing_customer", "session_id", "created_at"}
 
-    Args:
-        value: A string, list of strings, or dict of strings.
+PARSED_FIELDS = {"company", "job_title", "address", "website"}
 
-    Returns:
-        List[str]: A flat list of cleaned strings.
-    """
-    if isinstance(value, str):
-        return [value]
-    elif isinstance(value, dict):
-        return [v for v in value.values() if isinstance(v, str)]
-    elif isinstance(value, list):
-        return [v for v in value if isinstance(v, str)]
-    return []
+AWS_S3_BUCKET = settings.bucket_name
+S3_IMAGE_PREFIX = "images/"
 
+async def upload_to_s3(filename, file_bytes, content_type):
+    session = aiobotocore.session.get_session()
+    key = f"{S3_IMAGE_PREFIX}{filename}"
+    async with session.create_client(
+        's3',
+        region_name=settings.aws_origin,
+        aws_secret_access_key=settings.aws_secret_access_key,
+        aws_access_key_id=settings.aws_access_key,
+    ) as s3_client:
+        await s3_client.put_object(
+            Bucket=AWS_S3_BUCKET,
+            Key=key,
+            Body=file_bytes,
+            ContentType=content_type
+        )
+        url = f"https://{AWS_S3_BUCKET}.s3.{settings.aws_origin}.amazonaws.com/{key}"
+        return url
 
-@router.post("/ocr", response_model=OcrResult, status_code=201)
+def normalize_key(key: str) -> str:
+    return FIELD_ALIASES.get(key.strip().lower(), key.strip().lower())
+
+@router.post("/ocr", response_model=dict, status_code=201)
 async def upload_card_image(file: UploadFile = File(...), session_id: str = Form(...)):
-    """
-    OCR endpoint for business card image upload. It extracts contact details, enriches them,
-    classifies the lead using AI, and stores the result in the database.
-
-    Args:
-        file (UploadFile): Image file of a business card.
-        session_id (str): Unique identifier for the OCR session.
-
-    Returns:
-        OcrResult: Object containing parsed contact data and AI-generated tag.
-
-    Raises:
-        HTTPException: If file type is invalid or processing fails.
-    """
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
 
+    # Validate session_id first
+    try:
+        session_uuid = UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="session_id must be a valid UUID")
+
     image_bytes = await file.read()
+    image_url = await upload_to_s3(file.filename, image_bytes, file.content_type)
 
     try:
         extracted = extract_card_data(image_bytes, file.content_type)
-        logger.info("Raw OCR Output: %s", extracted)
+        logger.info("OCR Output: %s", extracted)
 
         if "message" in extracted:
             raise HTTPException(status_code=422, detail=extracted["message"])
 
-        field_aliases = {
-            "name": "full_name",
-            "fullname": "full_name",
-            "full name": "full_name",
-            "title": "job_title",
-            "job": "job_title",
-            "designation": "job_title",
-            "company": "company",
-            "organization": "company",
-            "website": "website",
-            "site": "website",
-            "address": "address",
-            "location": "address",
-        }
+        normalized = {}
+        parsed_fields = {}
 
-        raw_emails: List[str] = []
-        raw_phones: List[str] = []
-        parsed_fields_data: dict = {}
-        custom_fields: dict = {}
+        for raw_key, value in extracted.items():
+            if not value:
+                continue
+            key = normalize_key(raw_key)
 
-        # Process all extracted fields
-        for key, value in extracted.items():
-            key_lower = key.lower()
+            if key == "email":
+                if isinstance(value, str):
+                    normalized["emails"] = [e.strip().lower() for e in value.split(",") if "@" in e]
+                elif isinstance(value, list):
+                    normalized["emails"] = [e.strip().lower() for e in value if "@" in e]
 
-            if "email" in key_lower:
-                for email in flatten_field(value):
-                    email_clean = email.strip()
-                    if email_clean:
-                        raw_emails.extend(
-                            email_clean.split(",")
-                        )  # support comma-separated
+            elif key == "phone":
+                if isinstance(value, str):
+                    normalized["phones"] = [p.strip() for p in value.split(",") if p.strip()]
+                elif isinstance(value, list):
+                    normalized["phones"] = [p.strip() for p in value if p.strip()]
 
-            elif "phone" in key_lower:
-                for phone in flatten_field(value):
-                    for number in phone.split(","):  # support comma-separated
-                        number_clean = number.strip()
-                        if number_clean:
-                            raw_phones.append(number_clean)
+            elif key == "name":
+                normalized["name"] = value.strip()
 
-            elif key_lower in [
-                "full_name",
-                "company",
-                "job_title",
-                "address",
-                "website",
-            ]:
-                parsed_fields_data[key_lower] = value
+            elif key in PARSED_FIELDS:
+                parsed_fields[key] = value
 
-            elif key_lower in field_aliases:
-                mapped_key = field_aliases[key_lower]
-                parsed_fields_data[mapped_key] = value
+            elif key == "custom_fields" and isinstance(value, dict):
+                parsed_fields["custom_fields"] = value
 
-            else:
-                custom_fields[key_lower] = value
+        normalized.setdefault("emails", [])
+        normalized.setdefault("phones", [])
+        normalized.setdefault("name", "")
 
-        # Normalize and deduplicate
-        emails = sorted({e.strip() for e in raw_emails if "@" in e})
-        phones = sorted({p.strip() for p in raw_phones if p.strip()})
+        existing = await Lead.find_one({
+            "$or": [
+                {"emails": {"$in": normalized["emails"]}},
+                {"phones": {"$in": normalized["phones"]}}
+            ]
+        })
+        existing_customer = bool(existing)
 
-        parsed_fields_data["custom_fields"] = custom_fields
-
-        logger.info("Parsed Emails: %s", emails)
-        logger.info("Parsed Phones: %s", phones)
-        logger.info("Parsed Fields: %s", parsed_fields_data)
-
-        full_name = parsed_fields_data.get("full_name")
-        company = parsed_fields_data.get("company")
-        job_title = parsed_fields_data.get("job_title")
-
-        # Get or create session
-        session = await Session.find_one(Session.session_id == session_id)
-        if not session:
-            session = Session(session_id=session_id)
-            await session.insert()
-
-        # Find matching historical interactions
-        interactions = await find_mock_interactions(emails, phones, full_name, company)
-
-        # Count leads that match based on contact identity
-        session_match_count = await Lead.find(
-            {
-                "$or": [
-                    {"emails": {"$in": emails}},
-                    {"phones": {"$in": phones}},
-                    {"parsed_fields.full_name": full_name},
-                    {"parsed_fields.company": company},
-                ]
-            }
-        ).count()
-
-        # Prepare data for Gemini classification
+        # Build input for interest scoring
         lead_ai_data = {
-            "emails": emails,
-            "phones": phones,
-            "full_name": full_name,
-            "title": job_title,
-            "company": company,
-            "website": parsed_fields_data.get("website"),
+            "full_name": normalized["name"],
+            "emails": normalized["emails"],
+            "phones": normalized["phones"],
+            **parsed_fields.get("custom_fields", {}),
+            **{k: v for k, v in parsed_fields.items() if k != "custom_fields"}
         }
 
-        logger.info("Sending to AI classifier: %s", lead_ai_data)
-
-        # Classify lead using Gemini
-        tag_result = await classify_lead_with_ai(
-            lead_ai_data, interactions, session_match_count
-        )
-        lead_tag = tag_result.get("tag", "cold")
-
-        # Validate and store the lead
-        parsed_fields_model = ParsedFields(**parsed_fields_data)
+        # AI score + reason
+        score_result = await score_lead_interest_with_ai(lead_ai_data)
+        interest_score = score_result.get("interest_score", 0.0)
+        interest_reason = score_result.get("reason", "")
 
         lead = Lead(
-            session_id=session.id,
-            emails=emails,
-            phones=phones,
-            parsed_fields=parsed_fields_model.model_dump(),
-            tag=lead_tag,
-            created_at=datetime.now(timezone.utc),
+            session_id=session_uuid,
+            image_url=image_url,
+            emails=normalized["emails"],
+            phones=normalized["phones"],
+            name=normalized["name"],
+            interest_score=interest_score,
+            interest_reason=interest_reason,
+            existing_customer=existing_customer,
+            parsed_fields=LeadParsedFields(**parsed_fields) if parsed_fields else None,
+            created_at=datetime.now(timezone.utc)
         )
         await lead.insert()
 
-        return OcrResult(
-            lead_id=str(lead.id),
-            status="lead saved",
-            emails=emails,
-            phones=phones,
-            parsed_fields=parsed_fields_model,
-            tag=lead_tag,
-        )
+        return {
+            "lead_id": str(lead.id),
+            "status": "lead saved",
+            "emails": normalized["emails"],
+            "phones": normalized["phones"],
+            "name": normalized["name"],
+            "interest_score": interest_score,
+            "interest_reason": interest_reason,
+            "existing_customer": existing_customer,
+            "parsed_fields": parsed_fields
+        }
 
     except ValidationError as ve:
         logger.error("ValidationError: %s", ve)
         raise HTTPException(status_code=422, detail=str(ve))
-
     except Exception as e:
         logger.exception("Unexpected error during OCR processing")
         raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
