@@ -144,6 +144,9 @@ async def upload_card_image(file: UploadFile = File(...), session_id: str = Form
         )
         await lead.insert()
 
+        # Count the number of leads for this session
+        count = await Lead.find({"session_id": session_uuid}).count()
+
         return {
             "lead_id": str(lead.id),
             "status": "lead saved",
@@ -153,7 +156,8 @@ async def upload_card_image(file: UploadFile = File(...), session_id: str = Form
             "interest_score": interest_score,
             "interest_reason": interest_reason,
             "existing_customer": existing_customer,
-            "parsed_fields": parsed_fields
+            "parsed_fields": parsed_fields,
+            "count": count,
         }
 
     except ValidationError as ve:
