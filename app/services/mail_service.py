@@ -10,16 +10,27 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+def text_to_html(text: str) -> str:
+    """
+    Converts a plain text email body (with `\n`) into HTML using <br> tags.
+    """
+    escaped = text.replace("\n", "<br>")
+    return f"<html><body>{escaped}</body></html>"
+
+
 async def send_email_async(
     to_email: str,
     subject: str,
     content: str,
 ) -> dict:
+    html_version = text_to_html(content)
+
     message = Mail(
         from_email=Email(settings.email),
         to_emails=To(to_email),
         subject=subject,
         plain_text_content=Content("text/plain", content),
+        html_content=Content("text/html", html_version),
     )
 
     try:
