@@ -55,11 +55,9 @@ async def transcribe_and_summarize(
 
     dg_result = response.json()
     transcript = dg_result.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
-    if not transcript:
-        raise HTTPException(status_code=422, detail={"message": "No transcript returned from Deepgram.", "deepgram_response": dg_result})
-
-    # Summarize
-    summary = await summarize_interest(transcript)
+    # Do not raise error if transcript is empty; continue processing
+    # Summarize (allow empty transcript)
+    summary = await summarize_interest(transcript) if transcript else ""
 
     # Update or create session doc
     session_doc = await Session.find_one({"session_id": session_uuid})
@@ -80,18 +78,20 @@ async def transcribe_and_summarize(
     # === QUERY lead info to enrich AI prompt ===
     lead_doc = await Lead.find_one({"session_id": session_uuid})
     if not lead_doc or not lead_doc.name:
-        raise HTTPException(status_code=404, detail="Lead with name not found for session_id")
+        # If lead not found, still proceed with empty name
+        lead_name = ""
+        extra_info = {}
+    else:
+        lead_name = lead_doc.name
+        extra_info = {
+            "company": getattr(lead_doc.parsed_fields, "company", None) if lead_doc.parsed_fields else None,
+            "job_title": getattr(lead_doc.parsed_fields, "job_title", None) if lead_doc.parsed_fields else None,
+        }
 
-    # Build extra info dictionary from available fields
-    extra_info = {
-        "company": getattr(lead_doc.parsed_fields, "company", None) if lead_doc.parsed_fields else None,
-        "job_title": getattr(lead_doc.parsed_fields, "job_title", None) if lead_doc.parsed_fields else None,
-    }
-
-    # Call AI agent
+    # Call AI agent (allow empty transcript and name)
     email_result = await generate_email_body(
-        name=lead_doc.name,
-        transcript=transcript,
+        name=lead_name,
+        transcript=transcript or "",
         extra_info=extra_info
     )
 
@@ -99,16 +99,16 @@ async def transcribe_and_summarize(
     email_doc = PersonalizedEmail(
         session_id=session_uuid,
         subject="This is your personalized email",
-        body=email_result["text"],
+        body=email_result.get("text", ""),
         created_at=utc_now()
     )
     await email_doc.insert()
 
     return {
-        "session_id": session_id,
-        "audio_file_url": audio_url,
-        "transcript": transcript,
-        "summary": summary,
-        "email_subject": email_doc.subject,
-        "email_body": email_doc.body
+        "session_id": session_id or "",
+        "audio_file_url": audio_url or "",
+        "transcript": transcript or "",
+        "summary": summary or "",
+        "email_subject": email_doc.subject or "",
+        "email_body": email_doc.body or ""
     }
